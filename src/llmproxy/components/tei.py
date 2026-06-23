@@ -4,9 +4,64 @@ Proxies to llama-server rerank endpoint.
 """
 
 import os
-from typing import List, Optional
+import logging
+import json
+from typing import List, Optional, Any
 from pydantic import BaseModel
 import httpx
+
+logger = logging.getLogger(__name__)
+
+
+def _log_request(level: str, endpoint: str, method: str, body: Optional[dict], headers: Optional[dict] = None):
+    """Log request based on level. Avoids logging full text content unless trace."""
+    log_func = getattr(logger, level, logger.debug)
+    
+    # Truncate text content for debug, include full for trace
+    if body and level == "debug":
+        body_copy = dict(body)
+        # Truncate documents/texts
+        for key in ["documents", "texts", "query"]:
+            if key in body_copy:
+                val = body_copy[key]
+                if isinstance(val, list) and len(val) > 0:
+                    if len(val[0]) > 100 if isinstance(val[0], str) else True:
+                        body_copy[key] = [f"[{len(str(v))} chars]" for v in val[:3]]
+                        if len(val) > 3:
+                            body_copy[key].append(f"... and {len(val) - 3} more")
+                elif isinstance(val, str) and len(val) > 200:
+                    body_copy[key] = val[:200] + "..."
+        log_body = body_copy
+    else:
+        log_body = body
+    
+    log_func(
+        f"REQUEST [{method} {endpoint}]: "
+        f"headers={headers}, "
+        f"body={json.dumps(log_body, separators=(',', ':')) if log_body else None}"
+    )
+
+
+def _log_response(level: str, endpoint: str, status: int, body: Any, elapsed: float):
+    """Log response based on level."""
+    log_func = getattr(logger, level, logger.debug)
+    
+    # Truncate for debug
+    if level == "debug" and isinstance(body, (dict, list)):
+        if isinstance(body, list) and len(body) > 0:
+            log_body = f"[{len(body)} results]"
+        elif isinstance(body, dict):
+            log_body = {k: f"[{len(str(v))} chars]" if isinstance(v, str) and len(v) > 100 else v 
+                       for k, v in body.items()}
+        else:
+            log_body = body
+    else:
+        log_body = body
+    
+    log_func(
+        f"RESPONSE [{endpoint}] {status} ({elapsed:.2f}s): "
+        f"body={json.dumps(log_body, separators=(',', ':')) if log_body else None}"
+    )
 
 
 class RerankRequest(BaseModel):
@@ -42,12 +97,14 @@ class TEIComponent:
             "http://127.0.0.1:8082"
         )
         self.api_key = os.environ.get("LLMPROXY_TEIRERANKER_API_KEY", "")
+        
         # Set timeout to 60s for large batches (Hindsight can send 1500+ docs)
         self.client = httpx.AsyncClient(
             base_url=self.base_url,
-            timeout=httpx.Timeout(60.0, read=120.0),
-            headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+            timeout=httpx.Timeout(60.0, read=120.0)
         )
+        
+        logger.info(f"TEIComponent initialized: base_url={self.base_url}, api_key={'*' * 8 if self.api_key else '(none)'}")
     
     async def rerank(self, request: RerankRequest) -> List[RerankResult]:
         """
@@ -66,14 +123,13 @@ class TEIComponent:
           "query": "search query",
           "return_text": true/false
         }
-        
-        llama-server format (router-mode):
-        POST /rerank with similar structure
         """
-        import logging
+        import time
+        start = time.time()
+        
+        log_level = os.environ.get("LLMPROXY_LOG_LEVEL", "info").lower()
         
         # Handle Hindsight API compatibility
-        # Hindsight sends return_text instead of return_documents
         if request.return_text is not None:
             request.return_documents = request.return_text
         
@@ -81,13 +137,14 @@ class TEIComponent:
         if request.texts is not None:
             request.documents = request.texts
         
-        # Default documents if not provided (llama-server requires non-empty array)
+        # Default documents if not provided
         if request.documents is None or len(request.documents) == 0:
             request.documents = ["no documents provided"]
         
         # Default model if not provided
         if request.model is None:
             request.model = "reranker"
+        
         payload = {
             "model": request.model,
             "query": request.query,
@@ -102,40 +159,67 @@ class TEIComponent:
         if request.return_documents is not None:
             payload["return_documents"] = request.return_documents
         
-        # LOG: Payload being sent to llama-server
-        logging.info(f"LLMPROXY -> llama-server: POST /rerank, model='{payload['model']}', "
-                     f"query='{payload['query'][:80]}...', docs={len(payload['documents'])}, "
-                     f"top_n={payload.get('top_n', 'N/A')}, "
-                     f"return_docs={payload.get('return_documents', 'N/A')}")
+        # Build headers
+        req_headers = {}
+        if self.api_key:
+            req_headers["Authorization"] = f"Bearer {self.api_key}"
         
-        # Forward to llama-server (router mode uses /rerank, not /v1/rerank)
-        response = await self.client.post(
-            "/rerank",
-            json=payload
-        )
+        # Log request
+        logger.info(f"LLMPROXY RERANK: model='{payload['model']}', "
+                    f"query='{payload['query'][:80]}...', "
+                    f"docs={len(payload['documents'])}, "
+                    f"top_n={payload.get('top_n', 'N/A')}, "
+                    f"return_docs={payload.get('return_documents', 'N/A')}")
         
-        # LOG: Response status and body (truncated)
-        response_body = response.text[:500] if response.text else "N/A"
-        logging.info(f"LLMPROXY <- llama-server: {response.status_code}, body='{response_body}...'")
+        if log_level in ["debug", "trace"]:
+            _log_request(log_level, "/rerank", "POST", payload, req_headers)
         
-        response.raise_for_status()
-        
-        llama_response = response.json()
-        
-        # Transform llama-server response to TEI format
-        results = []
-        for i, item in enumerate(llama_response.get("results", [])):
-            # Preserve original index from backend (TEI spec: maps back to input documents)
-            # Fallback to enumerate position only if backend doesn't provide it
-            original_index = item.get("index", i)
-            result = RerankResult(
-                index=original_index,
-                score=item.get("relevance_score", 0.0),  # llama-server uses relevance_score, map to score
-                document=item.get("text") or item.get("document") if request.return_documents else None
+        # Forward to llama-server
+        try:
+            response = await self.client.post(
+                "/rerank",
+                json=payload,
+                headers=req_headers
             )
-            results.append(result)
-        
-        return results
+            elapsed = time.time() - start
+            
+            # Log response
+            if log_level in ["debug", "trace"]:
+                try:
+                    resp_body = response.json()
+                except:
+                    resp_body = response.text[:500]
+                _log_response(log_level, "/rerank", response.status_code, resp_body, elapsed)
+            
+            response.raise_for_status()
+            
+            llama_response = response.json()
+            
+            # Transform llama-server response to TEI format
+            results = []
+            for i, item in enumerate(llama_response.get("results", [])):
+                # Preserve original index from backend (TEI spec: maps back to input documents)
+                # Fallback to enumerate position only if backend doesn't provide it
+                original_index = item.get("index", i)
+                result = RerankResult(
+                    index=original_index,
+                    score=item.get("relevance_score", 0.0),
+                    document=item.get("text") or item.get("document") if request.return_documents else None
+                )
+                results.append(result)
+            
+            logger.info(f"Rerank complete: {len(results)} results in {elapsed:.2f}s")
+            return results
+            
+        except httpx.HTTPStatusError as e:
+            elapsed = time.time() - start
+            logger.error(f"Rerank HTTP error {e.response.status_code} after {elapsed:.1f}s: {e.response.text[:200]}")
+            raise
+        except Exception as e:
+            elapsed = time.time() - start
+            logger.error(f"Rerank error after {elapsed:.1f}s: {e}")
+            raise
     
     async def close(self):
         await self.client.aclose()
+        logger.info("TEIComponent closed")

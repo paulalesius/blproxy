@@ -42,6 +42,33 @@ Set these environment variables:
 | `LLMPROXY_TEIRERANKER_API_KEY` | `` | API key for reranker backend (optional) |
 | `LLMPROXY_HOST` | `0.0.0.0` | Proxy listen address |
 | `LLMPROXY_PORT` | `4001` | Proxy listen port |
+| `LLMPROXY_LOG_LEVEL` | `info` | Logging level: `info`, `debug`, `warning`, `error`, `trace` |
+
+### Logging Levels
+
+- **`info`** (default): Basic logging - endpoints, status codes, response times
+- **`debug`**: Full request/response logging with truncated text content (prompts, documents, etc. shown as `[N chars]`)
+- **`trace`**: Complete logging including full text content (useful for debugging inference content)
+- **`warning`**: Only warnings and errors
+- **`error`**: Only errors
+
+Example: Enable debug logging
+```bash
+export LLMPROXY_LOG_LEVEL=debug
+uv run python -m src.llmproxy.main
+```
+
+Example: Enable trace logging (full text content)
+```bash
+export LLMPROXY_LOG_LEVEL=trace
+uv run python -m src.llmproxy.main
+```
+
+Debug log example:
+```
+2026-06-23 22:07:19,173 - src.llmproxy.components.tei - DEBUG - REQUEST [POST /rerank]: headers={}, body={"model":"reranker","query":"test query...","documents":["[20 chars]","[20 chars]"]}
+2026-06-23 22:07:19,189 - src.llmproxy.components.tei - DEBUG - RESPONSE [/rerank] 200 (0.02s): body={"model":"reranker","results":[{"index":0,"score":-5.34}]}
+```
 
 ## Usage
 

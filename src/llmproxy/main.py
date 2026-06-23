@@ -1,12 +1,28 @@
 """LLM Proxy - Multi-service proxy server."""
 
 import os
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from uvicorn import Config, Server
 from .components.tei import TEIComponent
 from .components.openai import OpenAIComponent
+
+# Configure logging level from environment
+log_level = os.environ.get("LLMPROXY_LOG_LEVEL", "info").lower()
+LOG_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+    "trace": logging.DEBUG  # trace uses DEBUG level but we filter in code
+}
+logging.basicConfig(
+    level=LOG_LEVELS.get(log_level, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager

@@ -5,11 +5,57 @@ Routes OpenAI API endpoints to llama-server's OpenAI-compatible API.
 
 import os
 import logging
+import json
 from typing import Optional, Tuple, Any
 from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def _log_request(level: str, endpoint: str, method: str, body: Optional[dict], headers: Optional[dict] = None):
+    """Log request based on level. Avoids logging full text content unless trace."""
+    log_func = getattr(logger, level, logger.debug)
+    
+    # Truncate text content for debug, include full for trace
+    if body and level == "debug":
+        body_copy = dict(body)
+        # Truncate long text fields
+        for key in ["prompt", "messages", "input", "query"]:
+            if key in body_copy and isinstance(body_copy[key], (str, list)):
+                if isinstance(body_copy[key], str) and len(body_copy[key]) > 200:
+                    body_copy[key] = body_copy[key][:200] + "..."
+                elif isinstance(body_copy[key], list) and len(body_copy[key]) > 3:
+                    body_copy[key] = body_copy[key][:3] + ["..."]
+        log_body = body_copy
+    else:
+        log_body = body
+    
+    log_func(
+        f"REQUEST [{method} {endpoint}]: "
+        f"headers={headers}, "
+        f"body={json.dumps(log_body, separators=(',', ':')) if log_body else None}"
+    )
+
+
+def _log_response(level: str, endpoint: str, status: int, body: Any, elapsed: float):
+    """Log response based on level."""
+    log_func = getattr(logger, level, logger.debug)
+    
+    # Truncate for debug
+    if level == "debug" and isinstance(body, dict):
+        body_copy = dict(body)
+        for key in ["content", "text", "choices", "data"]:
+            if key in body_copy:
+                body_copy[key] = f"[{len(str(body_copy[key]))} chars]"
+        log_body = body_copy
+    else:
+        log_body = body
+    
+    log_func(
+        f"RESPONSE [{endpoint}] {status} ({elapsed:.2f}s): "
+        f"body={json.dumps(log_body, separators=(',', ':')) if log_body else None}"
+    )
 
 
 class OpenAIComponent:
@@ -21,32 +67,60 @@ class OpenAIComponent:
             "http://127.0.0.1:8080"
         )
         self.api_key = os.environ.get("LLMPROXY_OAILLM_API_KEY", "")
+        
         # Router-mode: model loading can take 20s+, set longer timeouts
         self.client = httpx.AsyncClient(
             base_url=self.base_url,
-            timeout=httpx.Timeout(30.0, read=90.0),
-            headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+            timeout=httpx.Timeout(30.0, read=90.0)
         )
+        
+        logger.info(f"OpenAIComponent initialized: base_url={self.base_url}, api_key={'*' * 8 if self.api_key else '(none)'}")
 
-    async def _forward_with_status(self, method: str, path: str, json: Optional[dict] = None) -> Tuple[Any, int]:
+    async def _forward_with_status(self, method: str, path: str, json: Optional[dict] = None, headers: Optional[dict] = None) -> Tuple[Any, int]:
         """
         Forward a request to llama-server and return (response_body, status_code).
-        Returns JSON body for non-streaming, or raw response for streaming.
+        Logs request/response based on LLMPROXY_LOG_LEVEL.
         """
+        import time
+        start = time.time()
+        
+        # Build headers
+        req_headers = headers or {}
+        if self.api_key:
+            req_headers["Authorization"] = f"Bearer {self.api_key}"
+        
+        # Log request
+        log_level = os.environ.get("LLMPROXY_LOG_LEVEL", "info").lower()
+        if log_level in ["debug", "trace"]:
+            _log_request(log_level, path, method, json, req_headers)
+        
         try:
-            resp = await self.client.request(method, path, json=json)
-            # Raise for error status codes so we can handle them
+            resp = await self.client.request(method, path, json=json, headers=req_headers)
+            elapsed = time.time() - start
+            
+            # Log response
+            if log_level in ["debug", "trace"]:
+                try:
+                    resp_body = resp.json()
+                except:
+                    resp_body = resp.text[:500]
+                _log_response(log_level, path, resp.status_code, resp_body, elapsed)
+            
+            # Raise for error status codes
             resp.raise_for_status()
-            return resp.json(), int(resp.status_code)
+            return resp.json(), resp.status_code
+            
         except httpx.HTTPStatusError as e:
-            # Forward error responses from llama-server with proper status code
-            logger.info(f"HTTP error {e.response.status_code}: {e.response.text[:200]}")
-            return e.response.json(), int(e.response.status_code)
+            elapsed = time.time() - start
+            logger.warning(f"HTTP error {e.response.status_code} on {method} {path}: {e.response.text[:200]}")
+            return e.response.json(), e.response.status_code
         except httpx.TimeoutException as e:
-            logger.warning(f"Timeout on {method} {path}: {e}")
+            elapsed = time.time() - start
+            logger.warning(f"Timeout on {method} {path} after {elapsed:.1f}s: {e}")
             return {"error": {"message": "backend timeout", "type": "timeout"}}, 504
         except Exception as e:
-            logger.error(f"Error on {method} {path}: {e}")
+            elapsed = time.time() - start
+            logger.error(f"Error on {method} {path} after {elapsed:.1f}s: {e}")
             return {"error": {"message": str(e), "type": "server_error"}}, 500
 
     async def models(self):
@@ -67,22 +141,31 @@ class OpenAIComponent:
             body: Request body
             return_response: If True, return (StreamingResponse, status_code) for streaming,
                            or (body, status_code) for non-streaming.
-                           If False, return body only (legacy mode).
         """
         is_stream = body.get("stream", False)
+        log_level = os.environ.get("LLMPROXY_LOG_LEVEL", "info").lower()
         
         if is_stream:
-            # Streaming mode: return StreamingResponse
             logger.info(f"chat_completions streaming request for model={body.get('model')}")
+            if log_level == "trace":
+                _log_request("trace", "/v1/chat/completions", "POST", body)
+        else:
+            if log_level in ["debug", "trace"]:
+                _log_request(log_level, "/v1/chat/completions", "POST", body)
+        
+        if is_stream:
             try:
                 resp = await self.client.post(
                     "/v1/chat/completions",
                     json=body,
+                    headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {},
                     timeout=httpx.Timeout(30.0, read=120.0)
                 )
                 resp.raise_for_status()
                 
-                # Return StreamingResponse that proxies the SSE stream
+                if log_level == "trace":
+                    logger.trace(f"Streaming response started, status={resp.status_code}")
+                
                 return StreamingResponse(
                     resp.aiter_lines(),
                     media_type="text/event-stream",
@@ -96,21 +179,17 @@ class OpenAIComponent:
                 logger.error(f"chat_completions streaming error: {e}")
                 return {"error": {"message": str(e), "type": "server_error"}}, 500
         else:
-            # Non-streaming mode: return JSON body
             body_result, status = await self._forward_with_status("POST", "/v1/chat/completions", json=body)
             if return_response:
                 return body_result, status
             return body_result
 
     async def completions(self, body: dict, return_response: bool = False):
-        """
-        POST /v1/completions.
+        """POST /v1/completions."""
+        log_level = os.environ.get("LLMPROXY_LOG_LEVEL", "info").lower()
         
-        Args:
-            body: Request body
-            return_response: If True, return (body, status_code) tuple.
-        """
-        logger.info(f"completions request: model={body.get('model')}, stream={body.get('stream', False)}")
+        if log_level in ["debug", "trace"]:
+            logger.debug(f"completions request: model={body.get('model')}, stream={body.get('stream', False)}")
         
         # llama-server requires a model name; fetch one if missing
         if "model" not in body:
@@ -118,7 +197,6 @@ class OpenAIComponent:
                 models_resp = await self.client.get("/v1/models")
                 models = models_resp.json()
                 if models.get("data"):
-                    # Use first available model
                     default_model = models["data"][0]["id"]
                     body = dict(body)
                     body["model"] = default_model
@@ -131,12 +209,15 @@ class OpenAIComponent:
         is_stream = body.get("stream", False)
         
         if is_stream:
-            # Streaming mode
             logger.info(f"completions streaming for model={body.get('model')}")
+            if log_level == "trace":
+                _log_request("trace", "/v1/completions", "POST", body)
+            
             try:
                 resp = await self.client.post(
                     "/v1/completions",
                     json=body,
+                    headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {},
                     timeout=httpx.Timeout(30.0, read=120.0)
                 )
                 resp.raise_for_status()
@@ -154,21 +235,16 @@ class OpenAIComponent:
                 logger.error(f"completions streaming error: {e}")
                 return {"error": {"message": str(e), "type": "server_error"}}, 500
         else:
-            # Non-streaming mode
-            logger.info(f"completions sending with model={body.get('model')}")
+            if log_level in ["debug", "trace"]:
+                logger.debug(f"completions sending with model={body.get('model')}")
+            
             body_result, status = await self._forward_with_status("POST", "/v1/completions", json=body)
             if return_response:
                 return body_result, status
             return body_result
 
     async def embeddings(self, body: dict, return_response: bool = False):
-        """
-        POST /v1/embeddings.
-        
-        Args:
-            body: Request body
-            return_response: If True, return (body, status_code) tuple.
-        """
+        """POST /v1/embeddings."""
         body_result, status = await self._forward_with_status("POST", "/v1/embeddings", json=body)
         if return_response:
             return body_result, status
@@ -176,3 +252,4 @@ class OpenAIComponent:
 
     async def close(self):
         await self.client.aclose()
+        logger.info("OpenAIComponent closed")
