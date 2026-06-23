@@ -1,47 +1,186 @@
 # LLM Proxy
 
-TEI-kompatibel proxy för rerank-operationer.
+A FastAPI-based proxy server that provides OpenAI-compatible and TEI (Text Embeddings Inference) compatible endpoints for llama-server instances.
 
-## Vad är detta?
+## Purpose
 
-Hindsight API förväntar sig en TEI (Text Embeddings Inference) server för reranking av sökresultat. llama.cpp:s `llama-server` har en inbyggd rerank-funktion men inte i TEI-format.
+This proxy solves two main problems:
 
-Denna proxy översätter:
-- TEI `/v1/rerank` → llama-server `/rerank`
-- TEI `/v1/info` → llama-server `/v1/models`
+1. **Unified access point**: Route requests to different llama-server instances (LLM on port 8080, reranker on port 8082) through a single endpoint
+2. **API compatibility**: Provide proper OpenAI and TEI API shapes that clients expect, with Hindsight compatibility shims
 
-## Varför behövs den?
+## Features
 
-Utan denna proxy kraschar Hindsight API vid startup:
+- **OpenAI-compatible endpoints**: `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`
+  - Full streaming support (SSE) for chat and completions
+  - Proper HTTP status code forwarding (400, 429, 500, etc.)
+  - Auto-fetch default model for completions when model name is missing
 
-```
-RuntimeError: Failed to connect to TEI server at http://127.0.0.1:4001/v1
-```
+- **TEI-compatible rerank endpoint**: `/v1/rerank`, `/rerank`
+  - Full TEI spec compliance with proper index preservation
+  - Hindsight API compatibility (`texts` → `documents`, `return_text` → `return_documents`)
+  - High timeouts (120s read) for large document batches (1500+ docs)
 
-## Hur den fungerar
+- **Router-mode aware**: Handles llama-server's slow model loading (20-35 seconds) with appropriate timeouts
 
-1. Hindsight anropar `POST http://127.0.0.1:4001/v1/rerank`
-2. llmproxy tar emot, transformerar till llama-server-format
-3. llmproxy anropar `POST http://127.0.0.1:8082/rerank`
-4. Response returneras till Hindsight
-
-## Status
-
-- **Aktiv**: Ja, körs på port 4001
-- **Backend**: llama-server reranker på port 8082
-- **Modell**: bge-reranker-v2-m3-Q4_0.gguf
-
-## Felsökning
+## Installation
 
 ```bash
-# Kolla att proxy är igång
-curl http://127.0.0.1:4001/health
-
-# Testa rerank direkt
-curl -X POST http://127.0.0.1:4001/v1/rerank \
-  -H "Content-Type: application/json" \
-  -d '{"model":"bge-reranker-v2-m3","query":"test","documents":["doc1","doc2"]}'
-
-# Kolla backend
-curl http://127.0.0.1:8082/v1/models
+cd /src/llmproxy
+uv sync  # or: pip install -e .
 ```
+
+## Configuration
+
+Set these environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLMPROXY_OAILLM_BASE_URL` | `http://127.0.0.1:8080` | LLM llama-server URL |
+| `LLMPROXY_OAILLM_API_KEY` | `` | API key for LLM backend (optional) |
+| `LLMPROXY_TEIRERANKER_BASE_URL` | `http://127.0.0.1:8082` | Reranker llama-server URL |
+| `LLMPROXY_TEIRERANKER_API_KEY` | `` | API key for reranker backend (optional) |
+| `LLMPROXY_HOST` | `0.0.0.0` | Proxy listen address |
+| `LLMPROXY_PORT` | `4001` | Proxy listen port |
+
+## Usage
+
+### Start the proxy
+
+```bash
+export LLMPROXY_OAILLM_BASE_URL=http://127.0.0.1:8080
+export LLMPROXY_TEIRERANKER_BASE_URL=http://127.0.0.1:8082
+export LLMPROXY_PORT=4001
+
+uv run python -m src.llmproxy.main
+```
+
+Or use the systemd service:
+
+```bash
+sudo systemctl enable --now llmproxy
+sudo systemctl status llmproxy
+```
+
+### OpenAI API examples
+
+**List models:**
+```bash
+curl http://localhost:4001/v1/models
+```
+
+**Chat completion (non-streaming):**
+```bash
+curl -X POST http://localhost:4001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.6-dense-mtp-custom",
+    "messages": [{"role": "user", "content": "Say hi"}],
+    "max_tokens": 50
+  }'
+```
+
+**Chat completion (streaming):**
+```bash
+curl -X POST http://localhost:4001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.6-dense-mtp-custom",
+    "messages": [{"role": "user", "content": "Say hi"}],
+    "stream": true
+  }'
+```
+
+**Completions (auto-selects first available model):**
+```bash
+curl -X POST http://localhost:4001/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Once upon a time",
+    "max_tokens": 20
+  }'
+```
+
+**Embeddings:**
+```bash
+curl -X POST http://localhost:4001/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bge-m3",
+    "input": "test document"
+  }'
+```
+
+### TEI Rerank examples
+
+**Full TEI format:**
+```bash
+curl -X POST http://localhost:4001/v1/rerank \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "reranker",
+    "query": "machine learning",
+    "documents": ["ML is great", "ML is hard", "ML is easy"],
+    "top_n": 2,
+    "return_documents": true
+  }'
+```
+
+**Hindsight-compatible format (simplified):**
+```bash
+curl -X POST http://localhost:4001/v1/rerank \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "machine learning",
+    "texts": ["ML is great", "ML is hard"],
+    "return_text": false
+  }'
+```
+
+Response format:
+```json
+[
+  {"index": 0, "score": 0.92, "document": "ML is great"},
+  {"index": 2, "score": 0.78, "document": "ML is easy"}
+]
+```
+
+Note: `index` preserves the original document position (not sorted position), so you can map back to your input array.
+
+## Testing
+
+Run integration tests:
+
+```bash
+cd /src/llmproxy
+bash test.sh
+```
+
+This tests:
+- Health endpoint
+- TEI rerank (full and Hindsight formats)
+- OpenAI models list and detail
+- Chat completions (sync and streaming)
+- Completions (with auto-model selection)
+- Embeddings
+
+Tests are designed for router-mode llama-server, so they accept 500 (model loading) and 404 (model not loaded) as valid proxy behavior.
+
+## Architecture
+
+- `src/llmproxy/main.py`: FastAPI app with route definitions
+- `src/llmproxy/components/openai.py`: OpenAI endpoint proxy with streaming support
+- `src/llmproxy/components/tei.py`: TEI rerank proxy with Hindsight compatibility
+
+All components use `httpx.AsyncClient` with configurable timeouts and proper error handling.
+
+## Known behaviors
+
+- **Router-mode model loading**: First request to an unloaded model can take 20-35 seconds. Subsequent requests are fast.
+- **404 on `/v1/models/{id}`**: llama-server router mode returns 404 for individual model queries if the model isn't loaded. The proxy forwards this correctly.
+- **500 on completions/embeddings**: May occur if the model needs to load. The proxy forwards the error with proper status code.
+- **Index preservation**: TEI rerank results preserve original document indices, not sorted positions.
+
+## License
+
+MIT
