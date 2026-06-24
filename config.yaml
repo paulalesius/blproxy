@@ -1,0 +1,48 @@
+# Global lock configuration for llmproxy
+# Set LLMPROXY_LOCK_CONFIG env var to use a different config file
+
+global_lock:
+  enabled: true
+  
+  # If true, return 503 Service Unavailable when lock is busy
+  # If false (default), block/wait until lock is available
+  locked_error: false
+  
+  # Each endpoint can specify which other endpoints it locks.
+  # When an endpoint acquires its lock, all listed endpoints are blocked.
+  # Endpoints not listed here run freely in parallel.
+  
+  /v1/chat/completions:
+    locks:
+      - /v1/completions
+      - /v1/embeddings
+  
+  /v1/completions:
+    locks:
+      - /v1/chat/completions
+      - /v1/embeddings
+  
+  /v1/embeddings:
+    locks:
+      - /v1/chat/completions
+      - /v1/completions
+  
+  /v1/audio/transcriptions:
+    locks:
+      - /v1/audio/translations
+      - /v1/chat/completions
+      - /v1/completions
+  
+  /v1/audio/translations:
+    locks:
+      - /v1/audio/transcriptions
+  
+  /v1/audio/speech:
+    locks: []
+  
+  # Endpoints without an entry run freely:
+  # - /health
+  # - /info, /v1/info
+  # - /v1/models
+  # - /v1/rerank, /rerank
+  # - / (root)

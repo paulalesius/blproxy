@@ -2,11 +2,14 @@
 
 import os
 import logging
+import asyncio
 from contextlib import asynccontextmanager
+from typing import Dict, List, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from uvicorn import Config, Server
+import yaml
 from .components.tei import TEIComponent
 from .components.openai import OpenAIComponent
 from .components.embeddings import EmbeddingsComponent
@@ -31,6 +34,146 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Global lock configuration
+LOCK_CONFIG_PATH = os.environ.get(
+    "LLMPROXY_LOCK_CONFIG", 
+    os.path.join(os.path.dirname(__file__), "../../config.yaml")
+)
+
+# Lock state - initialized in lifespan
+lock_config: Optional[dict] = None
+group_locks: Dict[str, asyncio.Lock] = {}
+path_to_group: Dict[str, str] = {}
+
+
+def load_lock_config():
+    """Load global lock configuration from YAML file."""
+    global lock_config, group_locks, path_to_group
+    
+    if not os.path.exists(LOCK_CONFIG_PATH):
+        logger.warning(f"Lock config not found at {LOCK_CONFIG_PATH}, running without locks")
+        lock_config = {"enabled": False}
+        return
+    
+    try:
+        with open(LOCK_CONFIG_PATH, "r") as f:
+            config = yaml.safe_load(f) or {}
+        
+        lock_config = config.get("global_lock", {})
+        
+        if not lock_config.get("enabled", False):
+            logger.info("Global lock disabled in config")
+            return
+        
+        # Each path gets its own lock
+        # When a path runs, it acquires its own lock + all locks in its 'locks' list
+        path_to_group = {}
+        group_locks = {}
+        
+        for path, config_entry in lock_config.items():
+            if path == "enabled":
+                continue
+            
+            # Create a lock for this path if it doesn't exist
+            if path not in group_locks:
+                group_locks[path] = asyncio.Lock()
+            
+            path_to_group[path] = path  # Path maps to its own lock
+            
+            if isinstance(config_entry, dict):
+                locks = config_entry.get("locks", [])
+                if locks:
+                    logger.info(f"Endpoint {path} locks: {locks}")
+                else:
+                    logger.info(f"Endpoint {path} has no locks (runs freely)")
+            elif isinstance(config_entry, str):
+                # Simple format: path -> group_name (legacy)
+                logger.info(f"Endpoint {path} -> lock group '{config_entry}'")
+        
+        logger.info(f"Global lock enabled with {len(group_locks)} locks")
+        
+    except Exception as e:
+        logger.error(f"Failed to load lock config: {e}")
+        lock_config = {"enabled": False}
+
+
+class GlobalLockMiddleware(BaseHTTPMiddleware):
+    """Middleware that applies global locks based on path configuration.
+    
+    Each endpoint acquires its own lock + all locks listed in its config.
+    This ensures mutual exclusion between endpoints that lock each other.
+    
+    If locked_error is enabled, returns 503 instead of blocking.
+    """
+    
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        
+        # Check if this path has lock configuration
+        if lock_config and lock_config.get("enabled") and path in path_to_group:
+            # Get the locks this path needs to acquire
+            locks_to_acquire = [group_locks[path]]  # Always acquire own lock
+            
+            # Add locks from config
+            config_entry = lock_config.get(path, {})
+            if isinstance(config_entry, dict):
+                for locked_path in config_entry.get("locks", []):
+                    if locked_path in group_locks:
+                        locks_to_acquire.append(group_locks[locked_path])
+            
+            # Sort by lock id to ensure consistent ordering (avoid deadlock)
+            locks_to_acquire = sorted(locks_to_acquire, key=id)
+            
+            # Check if locked_error mode is enabled
+            locked_error = lock_config.get("locked_error", False)
+            
+            if locked_error:
+                # Check if all locks are available (non-blocking)
+                for lock in locks_to_acquire:
+                    if lock.locked():
+                        logger.debug(f"[{request.method} {path}] Lock busy, returning 503")
+                        return JSONResponse(
+                            status_code=503,
+                            content={
+                                "error": {
+                                    "message": f"Service temporarily busy, endpoint {path} is locked",
+                                    "type": "service_busy",
+                                    "retry_after": 2  # seconds
+                                }
+                            }
+                        )
+                
+                # All locks available, acquire them
+                logger.debug(f"[{request.method} {path}] All locks available, acquiring {len(locks_to_acquire)}")
+                for lock in locks_to_acquire:
+                    await lock.acquire()
+                
+                try:
+                    response = await call_next(request)
+                    return response
+                finally:
+                    # Release all locks in reverse order
+                    for lock in reversed(locks_to_acquire):
+                        lock.release()
+            else:
+                # Blocking mode - wait for all locks
+                if len(locks_to_acquire) > 1:
+                    logger.debug(f"[{request.method} {path}] Acquiring {len(locks_to_acquire)} locks (blocking)")
+                
+                for lock in locks_to_acquire:
+                    await lock.acquire()
+                
+                try:
+                    response = await call_next(request)
+                    return response
+                finally:
+                    # Release all locks in reverse order
+                    for lock in reversed(locks_to_acquire):
+                        lock.release()
+        
+        # No lock needed, process freely
+        return await call_next(request)
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
@@ -73,6 +216,9 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage startup and shutdown lifecycle."""
+    # Load and initialize global lock configuration
+    load_lock_config()
+    
     # Startup
     app.state.tei = TEIComponent()
     app.state.openai = OpenAIComponent()
@@ -91,7 +237,8 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add API key middleware
+# Add middleware in order: GlobalLock first, then APIKey
+app.add_middleware(GlobalLockMiddleware)
 app.add_middleware(APIKeyMiddleware)
 
 
