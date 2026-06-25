@@ -249,12 +249,13 @@ Path-based locking is automatically mapped to backends, but backend-based is cle
 
 ### Lock Script Hooks
 
-The lock script runs during locked request execution (when global locks are enabled).
+The lock script runs for every backend request, regardless of whether global locks are enabled.
 
 **Python scripts (.py):**
 - Can define a `handle_request(request_data)` function
-- `request_data` contains: `method`, `path`, `url`, `headers`
-- On post-phase: also includes `response_status` and `phase="post"`
+- `request_data` contains: `method`, `path`, `url`, `headers`, `phase`, `global_lock_enabled`
+- `phase` is "pre" (before request) or "post" (after response)
+- On post-phase: also includes `response_status`
 - Script runs on import if no `handle_request()` defined
 
 **Shell scripts (.sh, .bash):**
@@ -266,6 +267,7 @@ The lock script runs during locked request execution (when global locks are enab
   - `LOCK_SCRIPT_HEADERS` - Headers as JSON string
   - `LOCK_SCRIPT_PHASE` - "pre" (before request) or "post" (after response)
   - `LOCK_SCRIPT_RESPONSE_STATUS` - Response status code (post phase only)
+  - `LOCK_SCRIPT_GLOBAL_LOCK_ENABLED` - "true" or "false" string
 
 **Example shell script:**
 ```bash
