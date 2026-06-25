@@ -105,8 +105,7 @@ uv run python -m src.llmproxy.main
 | `LLMPROXY_LOG_LEVEL`            | `info` / `debug` / `trace`                                                  | `info`      |
 | `LLMPROXY_API_KEY`              | Enable API key protection on OpenAI endpoints when set                      | —           |
 | `LLMPROXY_LOCK_CONFIG`          | Path to `config.yaml` for global locks                                      | —           |
-| `LLMPROXY_REQUEST_PRE_PYSCRIPT` | Path to Python script executed before each request                          | —           |
-| `LLMPROXY_REQUEST_POST_PYSCRIPT`| Path to Python script executed after each request                           | —           |
+| `LLMPROXY_LOCK_SCRIPT`          | Path to Python (.py) or shell (.sh/.bash) script executed during locked requests | —           |
 
 Backend-specific API keys (`LLMPROXY_OAILLM_API_KEY`, etc.) are also supported.
 
@@ -132,14 +131,44 @@ global_lock:
 
 Endpoints not listed (`/v1/rerank`, `/v1/models`, `/health`, `/info`) always run without locks.
 
-### Pre/Post Request Hooks
+### Lock Script Hooks
 
-Hooks are regular Python files. They can either:
+The lock script runs during locked request execution (when global locks are enabled).
 
-1. Define a `handle_request(request_data)` function, or
-2. Contain top-level code that runs on import.
+**Python scripts (.py):**
+- Can define a `handle_request(request_data)` function
+- `request_data` contains: `method`, `path`, `url`, `headers`
+- On post-phase: also includes `response_status` and `phase="post"`
+- Script runs on import if no `handle_request()` defined
 
-`request_data` contains: `method`, `path`, `url`, `headers`, and (for post-hook) `response_status`.
+**Shell scripts (.sh, .bash):**
+- Must be executable (`chmod +x script.sh`)
+- Request data passed as environment variables:
+  - `LOCK_SCRIPT_METHOD` - HTTP method (GET, POST, etc.)
+  - `LOCK_SCRIPT_PATH` - Request path (/v1/chat/completions, etc.)
+  - `LOCK_SCRIPT_URL` - Full URL
+  - `LOCK_SCRIPT_HEADERS` - Headers as JSON string
+  - `LOCK_SCRIPT_PHASE` - "pre" (before request) or "post" (after response)
+  - `LOCK_SCRIPT_RESPONSE_STATUS` - Response status code (post phase only)
+
+**Example shell script:**
+```bash
+#!/bin/bash
+echo "Phase: $LOCK_SCRIPT_PHASE"
+echo "Path: $LOCK_SCRIPT_PATH"
+if [ "$LOCK_SCRIPT_PHASE" = "post" ]; then
+    echo "Response status: $LOCK_SCRIPT_RESPONSE_STATUS"
+fi
+```
+
+**Example Python script:**
+```python
+def handle_request(request_data):
+    phase = request_data.get("phase", "pre")
+    if phase == "post":
+        print(f"Response status: {request_data.get('response_status')}")
+    print(f"Request to {request_data.get('path')}")
+```
 
 ## Usage Examples
 

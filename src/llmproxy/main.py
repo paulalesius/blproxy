@@ -13,7 +13,7 @@ import yaml
 from .components.tei import TEIComponent
 from .components.openai import OpenAIComponent
 from .components.embeddings import EmbeddingsComponent
-from .script_loader import load_script_from_path, execute_hook
+from .script_loader import load_script_from_path, load_shell_script, execute_lock_script
 
 from .logging_middleware import LoggingMiddleware
 
@@ -43,9 +43,9 @@ logger = logging.getLogger(__name__)
 # If not set, runs without any locks (disabled by default)
 LOCK_CONFIG_PATH = os.environ.get("LLMPROXY_LOCK_CONFIG")
 
-# Pre/post request Python script hooks
-REQUEST_PRE_PYSCRIPT = os.environ.get("LLMPROXY_REQUEST_PRE_PYSCRIPT", "")
-REQUEST_POST_PYSCRIPT = os.environ.get("LLMPROXY_REQUEST_POST_PYSCRIPT", "")
+# Lock script - single script that runs during locked request execution
+# Can be either a Python script (.py) or shell script (.sh, .bash)
+LOCK_SCRIPT_PATH = os.environ.get("LLMPROXY_LOCK_SCRIPT", "")
 
 # Lock state - initialized in lifespan
 lock_config: Optional[dict] = None
@@ -53,8 +53,7 @@ group_locks: Dict[str, asyncio.Lock] = {}
 path_to_group: Dict[str, str] = {}
 
 # Script hooks - initialized in lifespan
-pre_script_hook: Optional[dict] = None
-post_script_hook: Optional[dict] = None
+lock_script_hook: Optional[dict] = None
 
 
 def load_lock_config():
@@ -119,39 +118,50 @@ def load_lock_config():
     except Exception as e:
         logger.error(f"Failed to load lock config: {e}")
 
-def load_script_hooks():
-    """Load pre/post request Python script hooks."""
-    global pre_script_hook, post_script_hook
+def load_lock_script():
+    """Load lock script hook (Python or shell script)."""
+    global lock_script_hook
     
-    # Load pre script
-    if REQUEST_PRE_PYSCRIPT:
-        pre_script_hook = load_script_from_path(REQUEST_PRE_PYSCRIPT)
-        if pre_script_hook["error"]:
-            logger.warning(f"Pre-script hook: {pre_script_hook['error']}")
+    if not LOCK_SCRIPT_PATH:
+        lock_script_hook = None
+        logger.info("Lock script disabled (LLMPROXY_LOCK_SCRIPT not set)")
+        return
+    
+    if not os.path.exists(LOCK_SCRIPT_PATH):
+        lock_script_hook = None
+        logger.warning(f"Lock script not found at {LOCK_SCRIPT_PATH}")
+        return
+    
+    # Determine script type by extension
+    _, ext = os.path.splitext(LOCK_SCRIPT_PATH)
+    ext = ext.lower()
+    
+    if ext in ('.py',):
+        # Python script
+        hook = load_script_from_path(LOCK_SCRIPT_PATH)
+        if hook["error"]:
+            logger.warning(f"Lock script (Python): {hook['error']}")
         else:
-            logger.info(f"Pre-script hook loaded from {REQUEST_PRE_PYSCRIPT}")
-            if pre_script_hook["handle_request"]:
+            logger.info(f"Lock script loaded (Python): {LOCK_SCRIPT_PATH}")
+            if hook["handle_request"]:
                 logger.info("  - has handle_request() function")
             else:
                 logger.info("  - runs as plain script on import")
-    else:
-        pre_script_hook = None
-        logger.info("Pre-script hook disabled (LLMPROXY_REQUEST_PRE_PYSCRIPT not set)")
+        lock_script_hook = hook
     
-    # Load post script
-    if REQUEST_POST_PYSCRIPT:
-        post_script_hook = load_script_from_path(REQUEST_POST_PYSCRIPT)
-        if post_script_hook["error"]:
-            logger.warning(f"Post-script hook: {post_script_hook['error']}")
+    elif ext in ('.sh', '.bash',):
+        # Shell script
+        hook = load_shell_script(LOCK_SCRIPT_PATH)
+        if hook["error"]:
+            logger.warning(f"Lock script (shell): {hook['error']}")
         else:
-            logger.info(f"Post-script hook loaded from {REQUEST_POST_PYSCRIPT}")
-            if post_script_hook["handle_request"]:
-                logger.info("  - has handle_request() function")
-            else:
-                logger.info("  - runs as plain script on import")
+            logger.info(f"Lock script loaded (shell): {LOCK_SCRIPT_PATH}")
+            logger.info(f"  - executable: {hook['executable']}")
+        lock_script_hook = hook
+    
     else:
-        post_script_hook = None
-        logger.info("Post-script hook disabled (LLMPROXY_REQUEST_POST_PYSCRIPT not set)")
+        lock_script_hook = None
+        logger.warning(f"Unknown script type: {ext}, expected .py, .sh, or .bash")
 
 
 class GlobalLockMiddleware(BaseHTTPMiddleware):
@@ -202,32 +212,33 @@ class GlobalLockMiddleware(BaseHTTPMiddleware):
                     await lock.acquire()
 
             try:
-                # Pre-hook
-                if pre_script_hook:
+                # Lock script hook (runs once during locked execution)
+                if lock_script_hook:
                     request_data = {
                         "method": request.method,
                         "path": request.url.path,
                         "url": str(request.url),
                         "headers": dict(request.headers),
                     }
-                    result = execute_hook(pre_script_hook, request_data)
+                    result = execute_lock_script(lock_script_hook, request_data)
                     if not result["success"]:
-                        logger.warning(f"Pre-script hook failed: {result['error']}")
+                        logger.warning(f"Lock script failed: {result['error']}")
 
                 response = await call_next(request)
-
-                # Post-hook
-                if post_script_hook:
+                
+                # Post-response hook (if Python with handle_request that accepts response_status)
+                if lock_script_hook and lock_script_hook.get("type") == "python":
                     request_data = {
                         "method": request.method,
                         "path": request.url.path,
                         "url": str(request.url),
                         "headers": dict(request.headers),
                         "response_status": response.status_code,
+                        "phase": "post",
                     }
-                    result = execute_hook(post_script_hook, request_data)
+                    result = execute_lock_script(lock_script_hook, request_data)
                     if not result["success"]:
-                        logger.warning(f"Post-script hook failed: {result['error']}")
+                        logger.warning(f"Lock script (post) failed: {result['error']}")
 
                 return response
             finally:
@@ -279,8 +290,8 @@ async def lifespan(app: FastAPI):
     # Load and initialize global lock configuration
     load_lock_config()
     
-    # Load pre/post request script hooks
-    load_script_hooks()
+    # Load lock script hook
+    load_lock_script()
     
     # Startup
     app.state.tei = TEIComponent()
