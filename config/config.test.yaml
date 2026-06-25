@@ -1,37 +1,33 @@
+# Test configuration for llmproxy
+# Minimal setup for running tests
+
 server:
-  host: 127.0.0.1
+  host: "127.0.0.1"
   port: 4002
-  api_key: ""
-  log_level: info
 
 backends:
-  # Default lock_script for all backends (can be overridden per-backend)
-  lock_script: ""
-  global_lock: true  # Controls enabled/locked_error at global_lock level
-  
   llm:
-    base_url: http://127.0.0.1:8080
-    api_key: ""
-    timeout: 30
-    read_timeout: 90
-    locks: []
-    # Can override default lock_script or set its own
-    # lock_script: "/path/to/llm-specific-lock.sh"
-  
+    url: "http://127.0.0.1:8001"
+    locks:
+      - chat
+      - embeddings
+      
   embed:
-    base_url: http://127.0.0.1:8081
-    api_key: ""
-    timeout: 30
-    read_timeout: 60
-    locks: []
-  
+    url: "http://127.0.0.1:8002"
+    locks:
+      - embeddings
+      
   rerank:
-    base_url: http://127.0.0.1:8082
-    api_key: ""
-    timeout: 30
-    read_timeout: 120
+    url: "http://127.0.0.1:8003"
     locks: []
+    
+  audio:
+    url: "http://127.0.0.1:8004"
+    locks:
+      - chat
 
-global_lock:
+# Lock configuration
+lock:
   enabled: true
   locked_error: false
+  retry_after: 5

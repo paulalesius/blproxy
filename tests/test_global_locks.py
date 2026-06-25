@@ -40,8 +40,8 @@ class TestGlobalLockMutualExclusion:
         with httpx.Client(base_url=llmproxy_server) as client:
             # These endpoints should exist and respond (status may vary based on backend)
             resp = client.get("/v1/models")
-            # Should get a response (200 if backend available, 500 if not)
-            assert resp.status_code in [200, 500]
+            # Should get a response (200 if backend available, 500/502 if not)
+            assert resp.status_code in [200, 500, 502]
     
     def test_audio_transcription_locks_chat(self, llmproxy_server):
         """Test that /v1/audio/transcriptions is configured to lock chat endpoints.
@@ -126,8 +126,8 @@ class TestGlobalLockLockedErrorMode:
                 # Backend error is OK for this test
                 continue
             status_code, elapsed = result
-            # Should get a response (200, 400, 422, 500, or 503)
-            assert status_code in [200, 400, 422, 500, 503]
+            # Should get a response (200, 400, 422, 500, 502, or 503)
+            assert status_code in [200, 400, 422, 500, 502, 503]
     
     def test_503_response_has_retry_after(self, llmproxy_server):
         """Test that 503 responses include retry_after header.
@@ -187,7 +187,7 @@ class TestGlobalLockDeadlockPrevention:
                 # Backend error is OK
                 continue
             # Should get a response (400 is OK for bad request)
-            assert result in [200, 400, 422, 500, 503]
+            assert result in [200, 400, 422, 500, 502, 503]
 
 
 class TestGlobalLockEndpointsRunFreely:
@@ -208,7 +208,7 @@ class TestGlobalLockEndpointsRunFreely:
         """Test that /v1/models is not locked."""
         with httpx.Client(base_url=llmproxy_server) as client:
             resp = client.get("/v1/models")
-            assert resp.status_code in [200, 500]
+            assert resp.status_code in [200, 500, 502]
     
     def test_info_endpoint_not_locked(self, llmproxy_server):
         """Test that /info and /v1/info are not locked."""

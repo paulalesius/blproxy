@@ -80,14 +80,30 @@ def build_app_config(raw: Dict[str, Any]) -> AppConfig:
             backends[name] = BackendConfig(name=name, url=default_url)
 
     # --- Lock config ---
+    # Build lock.backends from per-backend locks lists
+    # config.yaml format: backends.llm.locks: [embed, rerank]
+    # We invert this: lock.backends[embed] = [llm] means "embed is locked by llm"
+    lock_backends_map: dict[str, list[str]] = {}
+    for backend_name, backend_config in backends.items():
+        for locked_backend in backend_config.locks:
+            if locked_backend not in lock_backends_map:
+                lock_backends_map[locked_backend] = []
+            lock_backends_map[locked_backend].append(backend_name)
+    
     lock_raw = raw.get("global_lock") or raw.get("lock") or backends_raw.get("global_lock", {})
     if isinstance(lock_raw, bool):
         lock_raw = {"enabled": lock_raw}
-
+    
+    # Merge raw config with computed map (raw takes precedence if present)
+    raw_backends = lock_raw.get("backends", {}) or {}
+    for key, value in lock_backends_map.items():
+        if key not in raw_backends:
+            raw_backends[key] = value
+    
     lock = LockConfig(
         enabled=bool(lock_raw.get("enabled", True)),
         locked_error=bool(lock_raw.get("locked_error", False)),
-        backends=lock_raw.get("backends", {}) or {},
+        backends=raw_backends,
     )
 
     api_key = raw.get("api_key") or server_raw.get("api_key") or ""

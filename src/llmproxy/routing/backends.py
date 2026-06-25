@@ -15,7 +15,16 @@ class Backend(Enum):
     def paths(self) -> list[str]:
         """Return paths that map to this backend."""
         mapping = {
-            Backend.LLM: ["/v1/chat/completions", "/v1/completions"],
+            Backend.LLM: [
+                "/v1/chat/completions",
+                "/v1/completions",
+                "/v1/models",
+                "/v1/models/*",
+                "/models",
+                "/models/*",
+                "/info",
+                "/v1/info",
+            ],
             Backend.EMBED: ["/v1/embeddings"],
             Backend.RERANK: ["/v1/rerank"],
         }
@@ -25,8 +34,14 @@ class Backend(Enum):
     def for_path(cls, path: str) -> Optional["Backend"]:
         """Get backend for a given path."""
         for backend in cls:
-            if path in backend.paths:
-                return backend
+            paths = backend.paths
+            for p in paths:
+                if p.endswith("*"):
+                    prefix = p[:-1]
+                    if path.startswith(prefix):
+                        return backend
+                elif path == p:
+                    return backend
         return None
 
 
