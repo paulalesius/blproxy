@@ -21,22 +21,16 @@ backends:
     api_key: ""
     timeout: 30
     read_timeout: 90
-    locks:
-      - embed
-      - rerank
+    locks: [embed, rerank]
   embed:
     base_url: http://127.0.0.1:8081
     api_key: ""
     timeout: 30
     read_timeout: 60
-    locks:
-      - llm
-      - rerank
+    locks: [llm, rerank]
   rerank:
     base_url: http://127.0.0.1:8082
     api_key: ""
     timeout: 30
     read_timeout: 120
-    locks:
-      - llm
-      - embed
+    locks: [llm, embed]
