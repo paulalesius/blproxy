@@ -124,7 +124,11 @@ class TEIComponent:
         # Default documents if not provided
         if documents is None or len(documents) == 0:
             documents = ["no documents provided"]
-        
+
+        # Spara den slutgiltiga dokumentlistan som skickas till backend
+        # (används senare som fallback om backend inte returnerar document-text)
+        sent_documents = documents
+
         # Default model if not provided
         model = request.model or "reranker"
         
@@ -196,16 +200,23 @@ class TEIComponent:
             # Transform llama-server response to TEI format
             results = []
             for i, item in enumerate(results_raw):
-                # Preserve original index from backend (TEI spec: maps back to input documents)
-                # Fallback to enumerate position only if backend doesn't provide it
                 original_index = item.get("index", i)
+
+                # Försök först få document-text från backend
+                doc_text = item.get("text") or item.get("document")
+
+                # Om return_documents=true och backend inte gav någon text → använd originalet
+                if request.return_documents and doc_text is None:
+                    if original_index < len(sent_documents):
+                        doc_text = sent_documents[original_index]
+
                 result = RerankResult(
                     index=original_index,
-                    score=item.get("relevance_score", 0.0),
-                    document=item.get("text") or item.get("document") if request.return_documents else None
+                    score=item.get("score") or item.get("relevance_score", 0.0),
+                    document=doc_text
                 )
                 results.append(result)
-            
+
             logger.info(f"Rerank complete: {len(results)} results in {elapsed:.2f}s")
             return results
             
