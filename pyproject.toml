@@ -18,6 +18,7 @@ test = [
     "pytest-asyncio>=0.23.0",
     "pytest-timeout>=2.3.0",
     "httpx>=0.28.0",  # httpx2 compatibility for starlette.testclient
+    "respx>=0.22.0",
 ]
 
 [build-system]

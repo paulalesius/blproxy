@@ -8,31 +8,6 @@ User=noname
 Group=noname
 WorkingDirectory=/src/llmproxy
 
-# LLM server (chat/completions/models)
-Environment=LLMPROXY_LLM_BASE_URL=http://127.0.0.1:8080
-Environment=LLMPROXY_LLM_API_KEY=
-Environment=LLMPROXY_LLM_TIMEOUT=30
-
-# Reranker server (TEI rerank)
-Environment=LLMPROXY_RERANK_BASE_URL=http://127.0.0.1:8082
-Environment=LLMPROXY_RERANK_API_KEY=
-Environment=LLMPROXY_RERANK_TIMEOUT=30
-
-# Embeddings server (dedicated embeddings instance)
-Environment=LLMPROXY_EMBED_BASE_URL=http://127.0.0.1:8081
-Environment=LLMPROXY_EMBED_API_KEY=
-Environment=LLMPROXY_EMBED_TIMEOUT=30
-
-# Proxy configuration
-Environment=LLMPROXY_HOST=0.0.0.0
-Environment=LLMPROXY_PORT=4001
-Environment=LLMPROXY_API_KEY=
-Environment=LLMPROXY_LOG_LEVEL=debug
-Environment=LLMPROXY_LOCK_SCRIPT=/etc/llmproxy/hook.py
-
-# Lock configuration (optional)
-# Use -c flag to specify config path
-
 # Setup and start
 ExecStartPre=/home/noname/.local/bin/uv sync
 ExecStart=/src/llmproxy/.venv/bin/python -m src.llmproxy.main -c /etc/llmproxy/config.yaml
