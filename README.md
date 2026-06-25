@@ -161,6 +161,7 @@ uv run python -m src.llmproxy.main -c /path/to/config.yaml
 | `LLMPROXY_HOST`                 | Listen address                                                              | `0.0.0.0`   |
 | `LLMPROXY_LOG_LEVEL`            | `info` / `debug` / `trace`                                                  | `info`      |
 | `LLMPROXY_API_KEY`              | Enable API key protection on OpenAI endpoints when set                      | —           |
+| `LLMPROXY_LOCKED_ERROR`         | If `true`, return 503 immediately when lock held; if `false`, block until acquired | `false`     |
 | `-c, --config PATH`             | Path to `config.yaml` for global locks and main configuration               | —           |
 | `LLMPROXY_LOCK_SCRIPT`          | Python (.py) / Shell (.sh/.bash) / Bash command executed during locked requests | —           |
 
@@ -233,6 +234,7 @@ backends:
 - **`backends.lock_script: ""`** — optional default Python/shell/bash command for all backends (set at `backends:` level)
 - **Per-backend `lock_script`** — override the default for a specific backend (set at `backends.llm.lock_script`, etc.)
 - **Lock script priority**: per-backend `lock_script` > `backends.lock_script` > `global_lock.lock_script` (legacy)
+- **Environment variable fallback**: `LLMPROXY_LOCK_SCRIPT` sets default for all backends when no config file provided
 
 **Legacy path-based locking** (older format, still supported):
 
@@ -365,7 +367,7 @@ sudo systemctl enable --now llmproxy
 sudo systemctl status llmproxy
 ```
 
-The service file needs to be updated to use `-c` flag instead of `LLMPROXY_CONFIG` env var.
+The service file uses `-c` flag to specify config path.
 
 ## Design Philosophy & Known Behaviors
 
@@ -421,7 +423,6 @@ if path.startswith("/v1/models/") and path != "/v1/models":
 
 - [SKILL.md](./SKILL.md) - Setup guide and common pitfalls
 - [test.sh](./test.sh) - Integration tests (run with `uv run pytest`)
-- [llmproxy.service](./llmproxy.service) - systemd unit file
 - [src/llmproxy/config.yaml](./src/llmproxy/config.yaml) - Backend-based lock configuration
 
 ## Testing
@@ -433,7 +434,7 @@ cd /src/llmproxy
 uv run python -m src.llmproxy.main -c /path/to/config.yaml
 ```
 
-Expected: All 13 global lock tests pass (backend servers must be running)
+Expected: All 13 global lock tests pass (uses mocked fixture, no backends needed)
 
 Full test suite:
 
@@ -442,7 +443,7 @@ cd /src/llmproxy
 uv run python -m src.llmproxy.main -c /path/to/config.yaml
 ```
 
-Expected: 38/38 tests pass (backend servers must be running)
+Expected: 67/67 tests pass (uses mocked fixture, no backends needed)
 
 Apache License 2.0
 
