@@ -181,4 +181,17 @@ def create_app(config_path: str | None = None) -> FastAPI:
             media_type=media_type,
         )
 
+    @app.get("/debug/routes")
+    async def debug_list_routes():
+        """Lists all registered routes - for debugging only."""
+        routes = []
+        for route in app.routes:
+            methods = getattr(route, "methods", None)
+            routes.append({
+                "path": getattr(route, "path", str(route)),
+                "methods": list(methods) if methods else None,
+                "name": getattr(route, "name", None),
+            })
+        return {"count": len(routes), "routes": routes}
+
     return app

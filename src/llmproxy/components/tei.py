@@ -105,20 +105,48 @@ class TEIComponent:
         return {"results": [r.model_dump() for r in results]}, 200
 
     async def get_info(self) -> tuple[dict, int]:
-        """Get backend info with proper auth header forwarding."""
+        """Get backend info. Tries real TEI /info first, then falls back gracefully."""
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        # Try the real TEI /info endpoint first
         try:
             resp = await self.client.get("/info", headers=headers)
-            resp.raise_for_status()
-            return resp.json(), resp.status_code
-        except httpx.HTTPStatusError as e:
-            return (e.response.json() if e.response.content else {"error": str(e)}), e.response.status_code
+            if resp.status_code == 200:
+                return resp.json(), 200
+        except Exception:
+            pass
+
+        # Fallback: llama-server style (uses /v1/models + /health)
+        try:
+            # Get model info
+            models_resp = await self.client.get("/v1/models", headers=headers)
+            models_resp.raise_for_status()
+            models_data = models_resp.json()
+
+            model_id = "reranker"
+            if models_data.get("data"):
+                model_id = models_data["data"][0].get("id", "reranker")
+
+            # Check if backend is healthy
+            health_resp = await self.client.get("/health", headers=headers)
+            is_healthy = health_resp.status_code == 200
+
+            return {
+                "model_id": model_id,
+                "revision": "llama-server",
+                "max_concurrent_requests": 512,
+                "healthy": is_healthy,
+            }, 200
+
         except Exception as e:
-            logger.error(f"Info endpoint error: {e}")
-            return {"error": {"message": str(e)}}, 502
+            logger.error(f"Failed to get info from rerank backend: {e}")
+            return {
+                "model_id": "reranker",
+                "revision": "unknown",
+                "error": str(e)
+            }, 200   # Return 200 so clients like Hindsight don't crash
 
     async def close(self):
         await self.client.aclose()
