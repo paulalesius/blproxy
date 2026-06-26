@@ -16,6 +16,12 @@ class BackendConfig:
     enabled: bool = True
     lock_script: Optional[str] = None
 
+    # --- Custom forwarder specific fields (only used when type == "forward") ---
+    type: str = "core"                    # "core" or "forward"
+    path_prefix: Optional[str] = None
+    paths: list[str] = field(default_factory=list)
+    strip_prefix: bool = False
+
 
 @dataclass
 class ServerConfig:

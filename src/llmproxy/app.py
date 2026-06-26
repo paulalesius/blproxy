@@ -12,7 +12,9 @@ from .components.openai import OpenAIComponent
 from .components.tei import TEIComponent
 from .components.embeddings import EmbeddingsComponent
 from .components.audio import STTComponent, TTSComponent
+from .components.forward import ForwardComponent
 from .middleware import LoggingMiddleware, APIKeyMiddleware, GlobalLockMiddleware
+from .routing.backends import get_backend_for_path
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,22 @@ async def lifespan(app: FastAPI):
     app.state.stt = STTComponent()
     app.state.tts = TTSComponent()
 
+    # Custom forward backends (transparent proxy + locking participants)
+    app.state.forwarders: dict[str, ForwardComponent] = {}
+    for name, backend_cfg in config.backends.items():
+        if backend_cfg.type == "forward" and backend_cfg.enabled:
+            fc = ForwardComponent(
+                name=name,
+                url=backend_cfg.url,
+                path_prefix=backend_cfg.path_prefix,
+                strip_prefix=backend_cfg.strip_prefix,
+                timeout=backend_cfg.timeout,
+                read_timeout=backend_cfg.read_timeout,
+                api_key=backend_cfg.api_key,
+            )
+            app.state.forwarders[name] = fc
+            logger.info(f"Registered custom forwarder: {name} (prefix={backend_cfg.path_prefix})")
+
     logger.info("All components initialized")
     yield
 
@@ -37,6 +55,8 @@ async def lifespan(app: FastAPI):
     await app.state.embeddings.close()
     await app.state.stt.close()
     await app.state.tts.close()
+    for fc in app.state.forwarders.values():
+        await fc.close()
 
 
 def create_app(config_path: str | None = None) -> FastAPI:
@@ -193,5 +213,42 @@ def create_app(config_path: str | None = None) -> FastAPI:
                 "name": getattr(route, "name", None),
             })
         return {"count": len(routes), "routes": routes}
+
+    # ============================================================
+    # CATCH-ALL FOR CUSTOM FORWARD BACKENDS (only if any are configured)
+    # Registered last so core routes always take precedence.
+    # ============================================================
+    has_custom_forwarders = any(
+        getattr(bcfg, "type", "core") == "forward"
+        for bcfg in config.backends.values()
+    )
+
+    if has_custom_forwarders:
+        @app.api_route(
+            "/{full_path:path}",
+            methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+        )
+        async def custom_forward_catch_all(request: Request, full_path: str):
+            """Catch-all route for custom forward backends.
+
+            Only registered when at least one custom forwarder is configured
+            in backends.custom. This guarantees zero impact on existing
+            core routes (audio, chat, embeddings, etc.) when the feature is not used.
+            """
+            path = f"/{full_path}" if full_path else "/"
+
+            # Explicit safeguard: skip known core paths to prevent any possible shadowing of specific routes
+            if any(path.startswith(p) for p in ("/v1/", "/models", "/rerank", "/info", "/health", "/debug", "/")) and not path.startswith(("/custom/", "/my-")):
+                from fastapi import HTTPException
+                raise HTTPException(status_code=404, detail="Not found")
+
+            backend = get_backend_for_path(path)
+
+            if isinstance(backend, str) and backend in getattr(app.state, "forwarders", {}):
+                comp: ForwardComponent = app.state.forwarders[backend]
+                return await comp.forward(request)
+
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Not found")
 
     return app

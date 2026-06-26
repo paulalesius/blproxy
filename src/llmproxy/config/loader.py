@@ -64,6 +64,36 @@ def build_app_config(raw: Dict[str, Any]) -> AppConfig:
                 lock_script=entry.get("lock_script"),
             )
 
+    # --- Custom forward backends (under backends.custom) ---
+    # These are transparent HTTP forwarders. They participate in global locking
+    # but do not have special protocol translation (no OpenAI/TEI wrapping).
+    custom_raw = backends_raw.get("custom", {}) or {}
+    if isinstance(custom_raw, dict):
+        for cust_name, cust_entry in custom_raw.items():
+            if not isinstance(cust_entry, dict):
+                continue
+            if cust_name in backends:
+                # avoid collision with core names
+                continue
+            url = cust_entry.get("url") or cust_entry.get("base_url") or cust_entry.get("backend_url") or ""
+            if not url:
+                # default to localhost with a made-up port to avoid crash; user should configure
+                url = f"http://127.0.0.1:9{hash(cust_name) % 1000 + 100}"
+
+            backends[cust_name] = BackendConfig(
+                name=cust_name,
+                url=url,
+                timeout=int(cust_entry.get("timeout", 30)),
+                read_timeout=int(cust_entry.get("read_timeout", cust_entry.get("readTimeout", 120))),
+                locks=cust_entry.get("locks", []) or [],
+                enabled=cust_entry.get("enabled", True),
+                lock_script=cust_entry.get("lock_script"),
+                type="forward",
+                path_prefix=cust_entry.get("path_prefix"),
+                paths=cust_entry.get("paths", []) or [],
+                strip_prefix=bool(cust_entry.get("strip_prefix", False)),
+            )
+
     # Ensure we always have the main backends
     for name, default_url in [
         ("llm", "http://127.0.0.1:8080"),

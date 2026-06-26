@@ -2,17 +2,19 @@
 
 ![Banner](banner.jpg)
 
-**A lightweight, production-oriented FastAPI proxy that provides a unified OpenAI-compatible and TEI-compatible API surface in front of multiple specialized llama-server instances.**
+**A lightweight, production-oriented FastAPI proxy that provides a unified OpenAI-compatible and TEI-compatible API surface in front of multiple specialized backends (llama-server, embeddings, rerankers, STT/TTS, and arbitrary custom HTTP services).**
 
 ## Purpose
 
-LLM Proxy solves the common problem of having **separate backends** for different LLM capabilities:
+LLM Proxy solves the common problem of having **separate backends** for different LLM and AI capabilities:
 
 - One llama-server for chat & completions (router mode)
-- One dedicated llama-server for embeddings
-- One llama-server for reranking (TEI-compatible)
+- One dedicated server for embeddings
+- One server for reranking (TEI-compatible)
+- Optional STT / TTS backends
+- Any number of **custom/unknown API services** that still need to participate in resource coordination
 
-Instead of clients talking to three different ports and dealing with inconsistent APIs, LLM Proxy offers a single, clean endpoint that behaves exactly like the official OpenAI and TEI APIs.
+Instead of clients talking to many different ports, LLM Proxy offers a single, clean endpoint with consistent OpenAI + TEI compatibility for the core services, plus transparent forwarding + global locking for everything else.
 
 It also adds important production features that llama-server alone does not provide out of the box:
 - Request serialization / global locks (backend-based, not path-based)
@@ -43,7 +45,8 @@ OpenAI-compatible audio endpoints (routed to dedicated backends):
 - `POST /v1/audio/speech` — Text-to-speech (JSON in → audio binary out)
 
 ### Production-Grade Capabilities
-- **Global Locks** (optional): Serialize heavy endpoints (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`) so they never run concurrently. Prevents backend overload. Can return `503` immediately or block and wait.
+- **Global Locks** (optional, backend-based): Any backend (core or custom) can declare which other backends it should lock while processing. Prevents resource contention across LLM, embeddings, rerank, audio, and custom services.
+- **Custom / Unknown-API Forwarders** (`backends.custom`): Add arbitrary HTTP services under the proxy. They get transparent request forwarding (including streaming) and full participation in the global locking system.
 - **API Key Authentication** (optional): Protect all OpenAI endpoints with a simple Bearer token.
 - **Request Hooks**: Run custom Python code before and after every request (after lock acquisition).
 - **Configurable Logging**: Three levels (`info`, `debug`, `trace`) with intelligent truncation of large prompts/documents.
@@ -71,7 +74,7 @@ OpenAI-compatible audio endpoints (routed to dedicated backends):
    models
 ```
 
-The proxy routes requests to the appropriate specialized backend (LLM chat, embeddings, reranker, STT, or TTS) while adding cross-cutting features like global locking and authentication.
+The proxy routes requests to the appropriate specialized backend (LLM chat, embeddings, reranker, STT, TTS, or any custom service defined under `backends.custom`) while adding cross-cutting features like global locking and authentication.
 
 ## Quick Start
 
@@ -143,18 +146,48 @@ backends:
 - **`backends.lock_script: ""`** — optional default Python/shell/bash command for all backends (set at `backends:` level)
 - **Per-backend `lock_script`** — override the default for a specific backend (set at `backends.llm.lock_script`, etc.)
 
-**Legacy path-based locking** (older format, still supported):
+### Custom / Unknown-API Backends (`backends.custom`)
+
+LLM Proxy supports **arbitrary custom backends** under `backends.custom`. These are transparent HTTP forwarders (no OpenAI/TEI protocol translation). They are useful for:
+
+- Internal tools, RAG services, or any HTTP API you want to put behind the same proxy
+- Including those services in the **global locking** system so they coordinate resource usage with LLM/embed/rerank backends
+
+Example:
 
 ```yaml
-global_lock:
-  enabled: true
-  /v1/chat/completions:
-    locks:
-      - /v1/completions
-      - /v1/embeddings
+backends:
+  llm:
+    url: http://127.0.0.1:8080
+    locks: [embed, rerank]
+
+  embed:
+    url: http://127.0.0.1:8081
+    locks: [llm, rerank]
+
+  custom:
+    my_rag_service:
+      url: http://127.0.0.1:9000
+      path_prefix: /rag
+      strip_prefix: true          # /rag/query → forwards to backend /query
+      locks:
+        - llm
+        - stt
+      timeout: 30
+      read_timeout: 300
+
+    internal_tool:
+      url: http://192.168.0.50:8085
+      paths:
+        - /tools/search
+        - /tools/analyze/*
+      locks: [llm]
 ```
 
-Path-based locking is automatically mapped to backends, but backend-based is cleaner and easier to maintain.
+**Behavior:**
+- Requests matching `path_prefix` or any entry in `paths` are forwarded transparently (all methods, headers, query params, streaming SSE, binary responses, etc.).
+- The custom backend participates fully in global locking (it can lock other backends and be locked by them).
+- Core endpoints (`/v1/chat/completions`, `/v1/embeddings`, etc.) are unaffected and take precedence.
 
 ### Lock Script Hooks
 
@@ -309,23 +342,6 @@ The service file uses `-c` flag to specify config path.
 - **Index correctness in rerank** is non-negotiable — clients must be able to map results back to their original documents.
 - **No magic**: If the backend returns 500 because a model is still loading, the proxy returns 500. This is the correct and expected behavior.
 - The project was built with a pragmatic, "vibe-coded but functional" approach for real internal use (RAG pipelines, Hindsight, local OpenAI-compatible clients).
-
-## Troubleshooting
-
-### Global locks not working
-
-1. Check that your `config.yaml` contains a `lock:` (or `global_lock:`) section with `enabled: true`.
-2. Verify backend names are correct (`llm`, `embed`, `rerank`, `stt`, `tts`).
-3. Make sure backends only list *other* backends they should lock (never themselves).
-4. Pass your config with the `-c /path/to/config.yaml` flag.
-
-### uv not found
-
-`uv` is usually at `~/.local/bin/uv`. Add it to your PATH or use the full path.
-
-### Audio endpoints return errors
-
-Make sure you have `backends.stt` and `backends.tts` configured with valid URLs in your YAML (they default to localhost ports 8083/8084).
 
 Apache License 2.0
 

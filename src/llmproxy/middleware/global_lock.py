@@ -143,7 +143,11 @@ class GlobalLockMiddleware(BaseHTTPMiddleware):
             # No backend matched, pass through
             return await call(request)
         
-        backend_name = backend.value
+        # Normalize to string name (works for both Backend enum and custom str names)
+        if isinstance(backend, str):
+            backend_name = backend
+        else:
+            backend_name = backend.value
         
         # Get config for lock checks
         config = get_config()
