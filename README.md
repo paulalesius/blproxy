@@ -2,7 +2,7 @@
 
 A declarative backend proxy with global locking. Routes requests to configured backends and manages cross-backend resource locks.
 
-![Banner](banner.jpg)
+![Banner](banner2.jpg)
 
 ## Purpose
 
