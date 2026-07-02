@@ -10,6 +10,7 @@ backends:
   # LLM backend - handles chat/completions
   llm:
     url: http://localhost:8080
+    remapper: /src/exrouter/samples/llm-responses-remapper.py
     paths:
       - /v1/chat/completions
       - /v1/completions
