@@ -1,80 +1,106 @@
-"""Test embedding remapper returns OpenAI-compatible format."""
+"""Test embedding remapper with exact backend response mocks."""
 
 import pytest
 import json
 from pathlib import Path
 import sys
-import asyncio
 
-# Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.exrouter.hooks import HookContext
-from src.exrouter.remapper import RemapResult
+
+# Exact mock responses from live backends (fetched from 8081 and 8082)
+# Embedding backend (8081) returns: {"model": "...", "data": [{"embedding": [...1024...], "index": 0}]}
+# Reranker backend (8082) returns: {"model": "...", "results": [{"index": 0, "relevance_score": -3.71...}]}
+EMBED_MOCK_RESPONSE = {
+    "model": "bge-m3",
+    "data": [
+        {"embedding": [0.0] * 1024, "index": 0}
+    ]
+}
 
 
-def test_embedding_remapper_returns_openai_format():
-    """Test that embedding remapper returns proper OpenAI format with 'data' key."""
-    
-    # Load the remapper
-    remapper_path = Path(__file__).parent.parent / "samples" / "llama-server-embedding-tei-remapper.py"
-    assert remapper_path.exists(), f"Remapper not found at {remapper_path}"
-    
-    # Import the remapper class
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("embedding_remapper", remapper_path)
-    assert spec is not None
-    remapper_module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(remapper_module)
-    
-    # Create remapper instance
-    remapper = remapper_module.RequestRemapper()
-    
-    # Mock llama-server response by testing the /v1/embeddings path
-    # We'll test with a mock context that simulates what llama-server returns
-    
-    # For this test, we verify the remapper logic directly
-    # by checking the code path for /v1/embeddings
-    
-    # Create mock HookContext
-    mock_context = HookContext(
-        request_path="/v1/embeddings",
-        request_method="POST",
-        request_headers={},
-        request_body=json.dumps({
-            "input": ["test text 1", "test text 2"]
-        }).encode(),
-        backend_name="embed"
-    )
-    
-    # The remapper calls llama-server, so we need to mock that
-    # For now, just verify the remapper class exists and has the right structure
-    assert hasattr(remapper, "remap")
-    assert asyncio.iscoroutinefunction(remapper.remap)
-
-
-def test_embedding_remapper_preserves_all_fields():
-    """Test that remapper preserves all fields from llama-server response."""
+@pytest.mark.asyncio
+async def test_embedding_remapper_returns_list_for_embed_path():
+    """Remapper returns raw TEI list for /embed path."""
     
     remapper_path = Path(__file__).parent.parent / "samples" / "llama-server-embedding-tei-remapper.py"
+    assert remapper_path.exists()
     
     import importlib.util
+    from unittest.mock import AsyncMock, Mock, patch
+    
     spec = importlib.util.spec_from_file_location("embedding_remapper", remapper_path)
-    assert spec is not None
     remapper_module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
     spec.loader.exec_module(remapper_module)
     
-    # Verify the remapper returns OpenAI format by inspecting the source
-    # Read the source file and verify it returns openai_resp directly
-    with open(remapper_path) as f:
-        source = f.read()
+    mock_response = AsyncMock()
+    mock_response.raise_for_status = AsyncMock()
+    mock_response.json = Mock(return_value=EMBED_MOCK_RESPONSE)
     
-    # Check that the remapper returns the full openai_resp (not just embeddings list)
-    assert "json.dumps(openai_resp)" in source, \
-        "Remapper should return full OpenAI response, not just embeddings list"
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_response)
     
-    # Verify it does NOT extract just the embeddings (old TEI format)
-    assert 'json.dumps(embeddings)' not in source, \
-        "Remapper should NOT return just embeddings list (TEI format)"
+    with patch.object(remapper_module, '_client', mock_client):
+        remapper = remapper_module.RequestRemapper()
+        
+        ctx = HookContext(
+            request_path="/embed",
+            request_method="POST",
+            request_headers={},
+            request_body=json.dumps({"inputs": ["test"]}).encode(),
+            backend_name="embed"
+        )
+        
+        result = await remapper.remap(ctx)
+        
+        assert result.status_code == 200
+        data = json.loads(result.content)
+        assert isinstance(data, list), "Path /embed returns list"
+        assert len(data) == 1
+        assert isinstance(data[0], list)
+        assert len(data[0]) == 1024
+
+
+@pytest.mark.asyncio
+async def test_embedding_remapper_returns_dict_for_embeddings_path():
+    """Remapper returns OpenAI dict for /embeddings path."""
+    
+    remapper_path = Path(__file__).parent.parent / "samples" / "llama-server-embedding-tei-remapper.py"
+    assert remapper_path.exists()
+    
+    import importlib.util
+    from unittest.mock import AsyncMock, Mock, patch
+    
+    spec = importlib.util.spec_from_file_location("embedding_remapper", remapper_path)
+    remapper_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(remapper_module)
+    
+    mock_response = AsyncMock()
+    mock_response.raise_for_status = AsyncMock()
+    mock_response.json = Mock(return_value=EMBED_MOCK_RESPONSE)
+    
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_response)
+    
+    with patch.object(remapper_module, '_client', mock_client):
+        remapper = remapper_module.RequestRemapper()
+        
+        ctx = HookContext(
+            request_path="/embeddings",
+            request_method="POST",
+            request_headers={},
+            request_body=json.dumps({"input": ["test"]}).encode(),
+            backend_name="embed"
+        )
+        
+        result = await remapper.remap(ctx)
+        
+        assert result.status_code == 200
+        data = json.loads(result.content)
+        assert isinstance(data, dict), "Path /embeddings returns dict"
+        assert "data" in data
+        assert "model" in data
+        assert len(data["data"]) == 1
+        assert "embedding" in data["data"][0]
+        assert len(data["data"][0]["embedding"]) == 1024
